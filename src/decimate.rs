@@ -359,4 +359,34 @@ mod tests {
         assert!(decimated.faces.len() <= 32);
         assert!(stats.reduction_percentage > 50.0);
     }
+
+    #[test]
+    fn test_decimate_already_small_mesh() {
+        let cube = Mesh::cube(1.0);
+        let (decimated, stats) = decimate_mesh(&cube, 50);
+        assert_eq!(decimated.face_count(), 12);
+        assert_eq!(stats.reduction_percentage, 0.0);
+    }
+
+    #[test]
+    fn test_decimate_empty_mesh() {
+        let empty = Mesh::new(Vec::new(), Vec::new());
+        let (decimated, stats) = decimate_mesh(&empty, 10);
+        assert_eq!(decimated.face_count(), 0);
+        assert_eq!(stats.final_faces, 0);
+    }
+
+    #[test]
+    fn test_quadric_evaluation() {
+        // Plane z = 0 (0x + 0y + 1z + 0 = 0)
+        let q = Quadric::from_plane(0.0, 0.0, 1.0, 0.0);
+        // Point (1, 2, 3) distance to plane z=0 is 3, squared distance is 9.0
+        let cost = q.evaluate([1.0, 2.0, 3.0]);
+        assert!((cost - 9.0).abs() < 1e-9);
+
+        // Point on plane has 0 error
+        let cost_on_plane = q.evaluate([5.0, -2.0, 0.0]);
+        assert!(cost_on_plane.abs() < 1e-9);
+    }
 }
+

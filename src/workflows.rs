@@ -121,4 +121,39 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_get_workflow_lookup() {
+        let wf1 = get_workflow("PixelArtistry_01_Image_to_Watertight_Mesh.json");
+        assert!(wf1.is_some());
+        let wf1_no_ext = get_workflow("PixelArtistry_01_Image_to_Watertight_Mesh");
+        assert!(wf1_no_ext.is_some());
+        assert_eq!(wf1, wf1_no_ext);
+
+        let missing = get_workflow("non_existent_workflow.json");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_export_all_workflows_to_disk() {
+        let temp_dir = std::env::temp_dir().join(format!("test_wf_export_{}", std::process::id()));
+        let count = export_all_workflows(&temp_dir).expect("export workflows failed");
+        assert_eq!(count, 4);
+
+        for wf in get_all_workflows() {
+            let p = temp_dir.join(wf.name);
+            assert!(p.exists());
+            let read = fs::read_to_string(&p).unwrap();
+            assert_eq!(read, wf.json_content);
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_validate_workflow() {
+        assert!(validate_workflow("PixelArtistry_01_Image_to_Watertight_Mesh.json").is_ok());
+        assert!(validate_workflow("fake_invalid").is_err());
+    }
 }
+

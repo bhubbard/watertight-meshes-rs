@@ -142,8 +142,25 @@ pub fn analyze_topology(mesh: &Mesh) -> MeshHealthReport {
     let mut degenerate_faces = 0;
 
     for (f_idx, &[i0, i1, i2]) in mesh.faces.iter().enumerate() {
-        // Degenerate triangle check (duplicate vertex indices)
-        if i0 == i1 || i1 == i2 || i0 == i2 {
+        // Degenerate triangle check: duplicate vertex indices or zero cross-product area
+        let is_idx_degenerate = i0 == i1 || i1 == i2 || i0 == i2;
+        let is_area_degenerate = if !is_idx_degenerate && i0 < mesh.vertices.len() && i1 < mesh.vertices.len() && i2 < mesh.vertices.len() {
+            let p0 = mesh.vertices[i0];
+            let p1 = mesh.vertices[i1];
+            let p2 = mesh.vertices[i2];
+            let v0 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let v1 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            let cross = [
+                v0[1] * v1[2] - v0[2] * v1[1],
+                v0[2] * v1[0] - v0[0] * v1[2],
+                v0[0] * v1[1] - v0[1] * v1[0],
+            ];
+            cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2] < 1e-14
+        } else {
+            false
+        };
+
+        if is_idx_degenerate || is_area_degenerate {
             degenerate_faces += 1;
             continue;
         }
@@ -427,4 +444,42 @@ mod tests {
         assert_eq!(report.non_manifold_edge_count, 1, "Must find exactly 1 non-manifold edge");
         assert!(!report.is_watertight);
     }
+
+    #[test]
+    fn test_empty_mesh() {
+        let empty = Mesh::new(Vec::new(), Vec::new());
+        let report = analyze_topology(&empty);
+        assert_eq!(report.vertex_count, 0);
+        assert_eq!(report.face_count, 0);
+        assert!(!report.is_watertight);
+    }
+
+    #[test]
+    fn test_inverted_normals_detection() {
+        let mut cube = Mesh::cube(1.0);
+        // Reverse winding of all faces
+        for f in &mut cube.faces {
+            f.swap(0, 1);
+        }
+        let report = analyze_topology(&cube);
+        assert!(report.is_closed);
+        assert!(report.is_manifold);
+        assert!(report.has_inverted_normals);
+        assert!(report.signed_volume < 0.0);
+        assert!(!report.is_watertight, "Inverted normal cube cannot be watertight");
+    }
+
+    #[test]
+    fn test_degenerate_triangles_detection() {
+        let verts = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0], // collinear
+        ];
+        let faces = vec![[0, 1, 2]];
+        let mesh = Mesh::new(verts, faces);
+        let report = analyze_topology(&mesh);
+        assert_eq!(report.degenerate_face_count, 1);
+    }
 }
+

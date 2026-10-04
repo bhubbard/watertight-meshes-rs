@@ -619,3 +619,97 @@ impl Mesh {
         Self::new(vertices, faces)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_cube_primitive() {
+        let cube = Mesh::cube(2.0);
+        assert_eq!(cube.vertex_count(), 8);
+        assert_eq!(cube.face_count(), 12);
+        let aabb = cube.bounding_box();
+        assert!((aabb.size()[0] - 2.0).abs() < 1e-9);
+        assert!((aabb.size()[1] - 2.0).abs() < 1e-9);
+        assert!((aabb.size()[2] - 2.0).abs() < 1e-9);
+        assert!((aabb.center()[0]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cylinder_primitive() {
+        let open_cyl = Mesh::cylinder(1.0, 4.0, 16, false);
+        assert_eq!(open_cyl.vertex_count(), 32);
+        assert_eq!(open_cyl.face_count(), 32);
+
+        let capped_cyl = Mesh::cylinder(1.0, 4.0, 16, true);
+        assert_eq!(capped_cyl.vertex_count(), 34);
+        assert_eq!(capped_cyl.face_count(), 64);
+    }
+
+    #[test]
+    fn test_normalize_scale() {
+        let mut cube = Mesh::cube(10.0);
+        cube.normalize_scale(2.0);
+        let aabb = cube.bounding_box();
+        assert!((aabb.max_extent() - 2.0).abs() < 1e-9);
+        assert!(aabb.center()[0].abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_compute_normals() {
+        let cube = Mesh::cube(1.0);
+        let face_normals = cube.compute_face_normals();
+        assert_eq!(face_normals.len(), 12);
+        for n in &face_normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_obj_roundtrip() {
+        let original = Mesh::cube(1.0);
+        let temp_path = std::env::temp_dir().join(format!("test_cube_{}.obj", std::process::id()));
+
+        original.save(&temp_path).expect("save OBJ failed");
+        let loaded = Mesh::load(&temp_path).expect("load OBJ failed");
+
+        assert_eq!(loaded.vertex_count(), original.vertex_count());
+        assert_eq!(loaded.face_count(), original.face_count());
+
+        let _ = fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_stl_roundtrip() {
+        let original = Mesh::cube(1.0);
+        let temp_path = std::env::temp_dir().join(format!("test_cube_{}.stl", std::process::id()));
+
+        original.save(&temp_path).expect("save STL failed");
+        let loaded = Mesh::load(&temp_path).expect("load STL failed");
+
+        assert_eq!(loaded.face_count(), original.face_count());
+        // In STL, vertices are per-triangle (3 * 12 = 36)
+        assert_eq!(loaded.vertex_count(), 36);
+
+        let _ = fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_ply_roundtrip() {
+        let original = Mesh::cube(1.0);
+        let temp_path = std::env::temp_dir().join(format!("test_cube_{}.ply", std::process::id()));
+
+        original.save(&temp_path).expect("save PLY failed");
+        let loaded = Mesh::load(&temp_path).expect("load PLY failed");
+
+        assert_eq!(loaded.vertex_count(), original.vertex_count());
+        assert_eq!(loaded.face_count(), original.face_count());
+
+        let _ = fs::remove_file(temp_path);
+    }
+}
+
+

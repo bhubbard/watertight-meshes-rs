@@ -372,3 +372,56 @@ pub fn download_model(target_dir: &Path, file: &ModelFile) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_packs_list_integrity() {
+        assert_eq!(NODE_PACKS.len(), 9, "Must contain exactly 9 MostAadTech node packs");
+        for pack in NODE_PACKS {
+            assert!(!pack.name.is_empty());
+            assert!(pack.repo_url.starts_with("https://github.com/"));
+            assert_eq!(pack.pinned_sha.len(), 40, "SHA must be 40-char full git commit hash");
+            assert!(!pack.description.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_model_files_list_integrity() {
+        assert_eq!(MODEL_FILES.len(), 9, "Must contain exactly 9 model weights/configs");
+        for model in MODEL_FILES {
+            assert!(!model.subfolder.is_empty());
+            assert!(!model.filename.is_empty());
+            assert!(model.download_url.starts_with("https://huggingface.co/"));
+        }
+    }
+
+    #[test]
+    fn test_audit_comfyui_mock_directory() {
+        let temp_dir = std::env::temp_dir().join(format!("mock_comfyui_{}", std::process::id()));
+        let nodes_dir = temp_dir.join("custom_nodes");
+        let models_dir = temp_dir.join("models").join("diffusion_models");
+        fs::create_dir_all(&nodes_dir).unwrap();
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // Create 1 mock node
+        fs::create_dir_all(nodes_dir.join("WTiVo-WatertightVoxel-ComfyuiNode")).unwrap();
+        // Create 1 mock model
+        File::create(models_dir.join("trellis_2_int8_convrot.safetensors")).unwrap();
+
+        let report = audit_comfyui(&temp_dir);
+        assert_eq!(report.nodes_present, 1);
+        assert_eq!(report.nodes_missing, 8);
+        assert_eq!(report.models_present, 1);
+        assert_eq!(report.models_missing, 8);
+        assert!(!report.workflows_installed);
+
+        let detected = detect_comfyui_dir(Some(&temp_dir));
+        assert!(detected.is_some());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+

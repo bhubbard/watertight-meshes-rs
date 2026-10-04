@@ -270,4 +270,28 @@ mod tests {
         assert_eq!(stats.degenerate_faces_removed, 1);
         assert_eq!(stats.final_faces, 0);
     }
+
+    #[test]
+    fn test_duplicate_faces_removal() {
+        let vertices = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        // Duplicate triangle back-to-back
+        let faces = vec![[0, 1, 2], [0, 2, 1]];
+        let mesh = Mesh::new(vertices, faces);
+        let (welded, stats) = merge_by_distance(&mesh, 1e-4);
+        assert_eq!(stats.duplicate_faces_removed, 1);
+        assert_eq!(welded.faces.len(), 1);
+    }
+
+    #[test]
+    fn test_weld_empty_mesh() {
+        let empty = Mesh::new(Vec::new(), Vec::new());
+        let (welded, stats) = merge_by_distance(&empty, 1e-4);
+        assert_eq!(welded.vertex_count(), 0);
+        assert_eq!(stats.final_faces, 0);
+    }
 }
+

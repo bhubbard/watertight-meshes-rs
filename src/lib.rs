@@ -150,3 +150,65 @@ pub fn auto_repair(input_mesh: &Mesh, config: &RepairConfig) -> Result<(Mesh, Ve
 
     Ok((current_mesh, log))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auto_repair_open_cylinder() {
+        let cylinder = Mesh::cylinder(1.0, 2.0, 16, false);
+        let config = RepairConfig {
+            weld_tolerance: 1e-4,
+            fill_holes: true,
+            voxel_remesh: true,
+            voxel_resolution: 32,
+            target_faces: None,
+        };
+
+        let (repaired, logs) = auto_repair(&cylinder, &config).expect("auto_repair failed");
+        assert!(!logs.is_empty());
+        let health = analyze_topology(&repaired);
+        assert!(health.is_watertight, "Repaired cylinder must be 100% watertight");
+        assert!(health.is_manifold);
+        assert_eq!(health.boundary_edge_count, 0);
+    }
+
+    #[test]
+    fn test_auto_repair_non_manifold_mesh() {
+        let tjunction = Mesh::non_manifold_t_junction();
+        let config = RepairConfig {
+            weld_tolerance: 1e-4,
+            fill_holes: true,
+            voxel_remesh: true,
+            voxel_resolution: 24,
+            target_faces: None,
+        };
+
+        let (repaired, logs) = auto_repair(&tjunction, &config).expect("auto_repair failed");
+        assert!(!logs.is_empty());
+        let health = analyze_topology(&repaired);
+        assert!(health.is_watertight, "Non-manifold repair must yield watertight surface");
+        assert!(health.is_manifold);
+        assert_eq!(health.non_manifold_edge_count, 0);
+    }
+
+    #[test]
+    fn test_auto_repair_with_decimation() {
+        let cylinder = Mesh::cylinder(1.0, 2.0, 32, true);
+        let orig_faces = cylinder.face_count();
+        let config = RepairConfig {
+            weld_tolerance: 1e-4,
+            fill_holes: true,
+            voxel_remesh: false,
+            voxel_resolution: 32,
+            target_faces: Some(24),
+        };
+
+        let (repaired, logs) = auto_repair(&cylinder, &config).expect("auto_repair failed");
+        assert!(!logs.is_empty());
+        assert!(repaired.face_count() < orig_faces);
+        assert!(repaired.face_count() <= 32);
+    }
+}
+

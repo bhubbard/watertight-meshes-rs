@@ -620,4 +620,29 @@ mod tests {
         assert_eq!(after_rep.non_manifold_edge_count, 0);
         assert!(after_rep.signed_volume > 0.0);
     }
+
+    #[test]
+    fn test_voxel_remesh_cube() {
+        let cube = Mesh::cube(2.0);
+        let remeshed = voxel_remesh(
+            &cube,
+            VoxelRemeshOptions {
+                resolution: 24,
+                padding: 0.1,
+                iso_level: 0.5,
+            },
+        );
+        let rep = analyze_topology(&remeshed);
+        assert!(rep.is_watertight);
+        assert!(rep.signed_volume > 0.0);
+        assert_eq!(rep.euler_characteristic, 2);
+    }
+
+    #[test]
+    fn test_voxel_remesh_empty() {
+        let empty = Mesh::new(Vec::new(), Vec::new());
+        let remeshed = voxel_remesh(&empty, VoxelRemeshOptions::default());
+        assert!(remeshed.is_empty());
+    }
 }
+

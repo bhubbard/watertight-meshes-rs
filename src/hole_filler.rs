@@ -132,4 +132,23 @@ mod tests {
         assert!(after_rep.is_closed, "Filled cylinder must be closed");
         assert!(after_rep.is_watertight, "Filled cylinder must be watertight");
     }
+
+    #[test]
+    fn test_fill_already_closed_mesh() {
+        let cube = Mesh::cube(1.0);
+        let (filled, stats) = fill_holes(&cube, None);
+        assert_eq!(stats.holes_detected, 0);
+        assert_eq!(stats.holes_closed, 0);
+        assert_eq!(filled.face_count(), cube.face_count());
+    }
+
+    #[test]
+    fn test_fill_with_max_vertices_filter() {
+        let cylinder = Mesh::cylinder(1.0, 2.0, 16, false);
+        // Cylinder holes have 16 vertices. If max is 8, it should skip both.
+        let (_filled, stats) = fill_holes(&cylinder, Some(8));
+        assert_eq!(stats.holes_detected, 2);
+        assert_eq!(stats.holes_closed, 0);
+    }
 }
+

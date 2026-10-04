@@ -249,3 +249,28 @@ fn find_comfyui() -> Option<PathBuf> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_env_probe_runs_without_panic() {
+        let env = EnvironmentInfo::probe();
+        assert!(!env.os.is_empty());
+        assert!(!env.arch.is_empty());
+        assert!(env.recommended_wtivo_res >= 1024);
+        assert!(env.recommended_proxy_points > 0);
+
+        let diag = env.format_diagnostic();
+        assert!(diag.contains("Watertight 3D System & Environment Diagnostics"));
+        assert!(diag.contains(&env.os));
+    }
+
+    #[test]
+    fn test_detect_hardware_convenience() {
+        let hw = detect_hardware();
+        assert!(!hw.os.is_empty());
+    }
+}
+

@@ -1,0 +1,621 @@
+//! 3D Mesh representation and standard file format I/O (OBJ, STL, PLY).
+
+use crate::error::{Result, WatertightError};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::path::Path;
+
+/// 3D Axis-Aligned Bounding Box
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Aabb {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+impl Aabb {
+    pub fn new() -> Self {
+        Self {
+            min: [f64::INFINITY, f64::INFINITY, f64::INFINITY],
+            max: [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY],
+        }
+    }
+
+    pub fn extend(&mut self, p: [f64; 3]) {
+        for (i, &coord) in p.iter().enumerate() {
+            if coord < self.min[i] {
+                self.min[i] = coord;
+            }
+            if coord > self.max[i] {
+                self.max[i] = coord;
+            }
+        }
+    }
+
+    pub fn size(&self) -> [f64; 3] {
+        [
+            self.max[0] - self.min[0],
+            self.max[1] - self.min[1],
+            self.max[2] - self.min[2],
+        ]
+    }
+
+    pub fn center(&self) -> [f64; 3] {
+        [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+            (self.min[2] + self.max[2]) * 0.5,
+        ]
+    }
+
+    pub fn max_extent(&self) -> f64 {
+        let s = self.size();
+        s[0].max(s[1]).max(s[2])
+    }
+
+    pub fn diagonal(&self) -> f64 {
+        let s = self.size();
+        (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt()
+    }
+}
+
+impl Default for Aabb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 3D Point alias
+pub type Point3 = [f64; 3];
+/// 3D Vector alias
+pub type Vector3 = [f64; 3];
+/// Triangular face index triplet
+pub type Face = [usize; 3];
+
+/// Triangular 3D Mesh
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mesh {
+    pub vertices: Vec<[f64; 3]>,
+    pub faces: Vec<[usize; 3]>,
+    pub normals: Vec<[f64; 3]>,
+    pub uvs: Vec<[f64; 2]>,
+}
+
+impl Mesh {
+    pub fn new(vertices: Vec<[f64; 3]>, faces: Vec<[usize; 3]>) -> Self {
+        let mut mesh = Self {
+            vertices,
+            faces,
+            normals: Vec::new(),
+            uvs: Vec::new(),
+        };
+        mesh.compute_vertex_normals();
+        mesh
+    }
+
+    #[inline]
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    #[inline]
+    pub fn face_count(&self) -> usize {
+        self.faces.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.vertices.is_empty() || self.faces.is_empty()
+    }
+
+    pub fn bounding_box(&self) -> Aabb {
+        let mut aabb = Aabb::new();
+        for &v in &self.vertices {
+            aabb.extend(v);
+        }
+        aabb
+    }
+
+    /// Centers the mesh at origin [0, 0, 0] and scales to fit within target_extent
+    pub fn normalize_scale(&mut self, target_extent: f64) {
+        let aabb = self.bounding_box();
+        let center = aabb.center();
+        let extent = aabb.max_extent();
+        let scale = if extent > 1e-12 {
+            target_extent / extent
+        } else {
+            1.0
+        };
+
+        for v in &mut self.vertices {
+            v[0] = (v[0] - center[0]) * scale;
+            v[1] = (v[1] - center[1]) * scale;
+            v[2] = (v[2] - center[2]) * scale;
+        }
+    }
+
+    /// Computes normal vector for each triangle face
+    pub fn compute_face_normals(&self) -> Vec<[f64; 3]> {
+        self.faces
+            .iter()
+            .map(|&[i0, i1, i2]| {
+                let p0 = self.vertices[i0];
+                let p1 = self.vertices[i1];
+                let p2 = self.vertices[i2];
+                let v0 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+                let v1 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+                let n = [
+                    v0[1] * v1[2] - v0[2] * v1[1],
+                    v0[2] * v1[0] - v0[0] * v1[2],
+                    v0[0] * v1[1] - v0[1] * v1[0],
+                ];
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                if len > 1e-12 {
+                    [n[0] / len, n[1] / len, n[2] / len]
+                } else {
+                    [0.0, 0.0, 1.0]
+                }
+            })
+            .collect()
+    }
+
+    /// Computes angle-weighted or area-weighted vertex normals
+    pub fn compute_vertex_normals(&mut self) {
+        let mut normals = vec![[0.0, 0.0, 0.0]; self.vertices.len()];
+        let face_normals = self.compute_face_normals();
+
+        for (idx, &[i0, i1, i2]) in self.faces.iter().enumerate() {
+            let fn_norm = face_normals[idx];
+            for &vi in &[i0, i1, i2] {
+                normals[vi][0] += fn_norm[0];
+                normals[vi][1] += fn_norm[1];
+                normals[vi][2] += fn_norm[2];
+            }
+        }
+
+        for n in &mut normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-12 {
+                n[0] /= len;
+                n[1] /= len;
+                n[2] /= len;
+            } else {
+                *n = [0.0, 0.0, 1.0];
+            }
+        }
+
+        self.normals = normals;
+    }
+
+    /// Load mesh from file (.obj, .stl, .ply)
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+
+        match ext.as_str() {
+            "obj" => Self::from_obj(reader),
+            "stl" => Self::from_stl(reader),
+            "ply" => Self::from_ply(reader),
+            other => Err(WatertightError::UnsupportedFormat(format!(
+                "Unsupported file extension: .{}",
+                other
+            ))),
+        }
+    }
+
+    /// Save mesh to file (.obj, .stl, .ply)
+    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        match ext.as_str() {
+            "obj" => self.to_obj(&mut writer),
+            "stl" => self.to_stl_binary(&mut writer),
+            "ply" => self.to_ply(&mut writer),
+            other => Err(WatertightError::UnsupportedFormat(format!(
+                "Unsupported file extension: .{}",
+                other
+            ))),
+        }
+    }
+
+    // -------------------------------------------------------------
+    // OBJ I/O
+    // -------------------------------------------------------------
+
+    pub fn from_obj<R: BufRead>(mut reader: R) -> Result<Self> {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        let mut line = String::new();
+
+        while reader.read_line(&mut line)? > 0 {
+            let trimmed = line.trim();
+            if trimmed.starts_with("v ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let x: f64 = parts[1].parse().unwrap_or(0.0);
+                    let y: f64 = parts[2].parse().unwrap_or(0.0);
+                    let z: f64 = parts[3].parse().unwrap_or(0.0);
+                    vertices.push([x, y, z]);
+                }
+            } else if trimmed.starts_with("f ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let mut face_v = Vec::new();
+                    for part in &parts[1..] {
+                        let v_str = part.split('/').next().unwrap_or("");
+                        if let Ok(v_idx) = v_str.parse::<isize>() {
+                            let idx = if v_idx > 0 {
+                                (v_idx - 1) as usize
+                            } else {
+                                (vertices.len() as isize + v_idx) as usize
+                            };
+                            face_v.push(idx);
+                        }
+                    }
+                    // Fan triangulation for polygons
+                    if face_v.len() >= 3 {
+                        for k in 1..face_v.len() - 1 {
+                            faces.push([face_v[0], face_v[k], face_v[k + 1]]);
+                        }
+                    }
+                }
+            }
+            line.clear();
+        }
+
+        Ok(Self::new(vertices, faces))
+    }
+
+    pub fn to_obj<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writeln!(writer, "# Exported by watertight-meshes-rs")?;
+        for v in &self.vertices {
+            writeln!(writer, "v {:.6} {:.6} {:.6}", v[0], v[1], v[2])?;
+        }
+        for n in &self.normals {
+            writeln!(writer, "vn {:.6} {:.6} {:.6}", n[0], n[1], n[2])?;
+        }
+        for f in &self.faces {
+            // 1-based indexing for OBJ
+            writeln!(
+                writer,
+                "f {}//{} {}//{} {}//{}",
+                f[0] + 1,
+                f[0] + 1,
+                f[1] + 1,
+                f[1] + 1,
+                f[2] + 1,
+                f[2] + 1
+            )?;
+        }
+        Ok(())
+    }
+
+    // -------------------------------------------------------------
+    // STL I/O
+    // -------------------------------------------------------------
+
+    pub fn from_stl<R: Read + BufRead>(mut reader: R) -> Result<Self> {
+        // Read first 80 bytes header to detect ASCII vs Binary
+        let mut header = [0u8; 80];
+        reader.read_exact(&mut header)?;
+
+        let header_str = String::from_utf8_lossy(&header);
+        if header_str.trim_start().starts_with("solid") {
+            // Check if it's truly ASCII by reading rest as string
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest)?;
+            let mut full = header.to_vec();
+            full.extend(rest);
+            if let Ok(ascii_str) = String::from_utf8(full.clone()) {
+                if ascii_str.contains("facet normal") && ascii_str.contains("endsolid") {
+                    return Self::from_stl_ascii(&ascii_str);
+                }
+            }
+            // If failed to parse as valid ASCII, fall back to Binary
+            let mut cursor = std::io::Cursor::new(full);
+            let mut h = [0u8; 80];
+            cursor.read_exact(&mut h)?;
+            return Self::from_stl_binary(&mut cursor);
+        }
+
+        Self::from_stl_binary(&mut reader)
+    }
+
+    fn from_stl_ascii(content: &str) -> Result<Self> {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        let mut current_tri = Vec::new();
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("vertex ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let x: f64 = parts[1].parse().unwrap_or(0.0);
+                    let y: f64 = parts[2].parse().unwrap_or(0.0);
+                    let z: f64 = parts[3].parse().unwrap_or(0.0);
+                    let idx = vertices.len();
+                    vertices.push([x, y, z]);
+                    current_tri.push(idx);
+                    if current_tri.len() == 3 {
+                        faces.push([current_tri[0], current_tri[1], current_tri[2]]);
+                        current_tri.clear();
+                    }
+                }
+            }
+        }
+
+        Ok(Self::new(vertices, faces))
+    }
+
+    fn from_stl_binary<R: Read>(reader: &mut R) -> Result<Self> {
+        let tri_count = reader.read_u32::<LittleEndian>()? as usize;
+        let mut vertices = Vec::with_capacity(tri_count * 3);
+        let mut faces = Vec::with_capacity(tri_count);
+
+        for _ in 0..tri_count {
+            // Skip 3 normal floats
+            let _nx = reader.read_f32::<LittleEndian>()?;
+            let _ny = reader.read_f32::<LittleEndian>()?;
+            let _nz = reader.read_f32::<LittleEndian>()?;
+
+            let p0 = [
+                reader.read_f32::<LittleEndian>()? as f64,
+                reader.read_f32::<LittleEndian>()? as f64,
+                reader.read_f32::<LittleEndian>()? as f64,
+            ];
+            let p1 = [
+                reader.read_f32::<LittleEndian>()? as f64,
+                reader.read_f32::<LittleEndian>()? as f64,
+                reader.read_f32::<LittleEndian>()? as f64,
+            ];
+            let p2 = [
+                reader.read_f32::<LittleEndian>()? as f64,
+                reader.read_f32::<LittleEndian>()? as f64,
+                reader.read_f32::<LittleEndian>()? as f64,
+            ];
+
+            // 2-byte attribute byte count
+            let _attr = reader.read_u16::<LittleEndian>()?;
+
+            let idx = vertices.len();
+            vertices.push(p0);
+            vertices.push(p1);
+            vertices.push(p2);
+            faces.push([idx, idx + 1, idx + 2]);
+        }
+
+        Ok(Self::new(vertices, faces))
+    }
+
+    pub fn to_stl_binary<W: Write>(&self, writer: &mut W) -> Result<()> {
+        let mut header = [0u8; 80];
+        let title = b"watertight-meshes-rs binary STL export";
+        header[..title.len()].copy_from_slice(title);
+        writer.write_all(&header)?;
+
+        writer.write_u32::<LittleEndian>(self.faces.len() as u32)?;
+
+        let face_normals = self.compute_face_normals();
+
+        for (i, &[i0, i1, i2]) in self.faces.iter().enumerate() {
+            let n = face_normals[i];
+            writer.write_f32::<LittleEndian>(n[0] as f32)?;
+            writer.write_f32::<LittleEndian>(n[1] as f32)?;
+            writer.write_f32::<LittleEndian>(n[2] as f32)?;
+
+            for &idx in &[i0, i1, i2] {
+                let p = self.vertices[idx];
+                writer.write_f32::<LittleEndian>(p[0] as f32)?;
+                writer.write_f32::<LittleEndian>(p[1] as f32)?;
+                writer.write_f32::<LittleEndian>(p[2] as f32)?;
+            }
+
+            // Attribute byte count = 0
+            writer.write_u16::<LittleEndian>(0)?;
+        }
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------
+    // PLY I/O
+    // -------------------------------------------------------------
+
+    pub fn from_ply<R: BufRead>(mut reader: R) -> Result<Self> {
+        let mut line = String::new();
+        let mut num_vertices = 0;
+        let mut num_faces = 0;
+
+        // Parse header
+        while reader.read_line(&mut line)? > 0 {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("element vertex ") {
+                num_vertices = rest.parse::<usize>().unwrap_or(0);
+            } else if let Some(rest) = trimmed.strip_prefix("element face ") {
+                num_faces = rest.parse::<usize>().unwrap_or(0);
+            } else if trimmed == "end_header" {
+                break;
+            }
+            line.clear();
+        }
+
+        let mut vertices = Vec::with_capacity(num_vertices);
+        for _ in 0..num_vertices {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let x: f64 = parts[0].parse().unwrap_or(0.0);
+                let y: f64 = parts[1].parse().unwrap_or(0.0);
+                let z: f64 = parts[2].parse().unwrap_or(0.0);
+                vertices.push([x, y, z]);
+            }
+        }
+
+        let mut faces = Vec::with_capacity(num_faces);
+        for _ in 0..num_faces {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let count: usize = parts[0].parse().unwrap_or(0);
+                if count >= 3 && parts.len() > count {
+                    let v0: usize = parts[1].parse().unwrap_or(0);
+                    let v1: usize = parts[2].parse().unwrap_or(0);
+                    let v2: usize = parts[3].parse().unwrap_or(0);
+                    faces.push([v0, v1, v2]);
+                }
+            }
+        }
+
+        Ok(Self::new(vertices, faces))
+    }
+
+    pub fn to_ply<W: Write>(&self, writer: &mut W) -> Result<()> {
+        writeln!(writer, "ply")?;
+        writeln!(writer, "format ascii 1.0")?;
+        writeln!(writer, "comment Exported by watertight-meshes-rs")?;
+        writeln!(writer, "element vertex {}", self.vertices.len())?;
+        writeln!(writer, "property float x")?;
+        writeln!(writer, "property float y")?;
+        writeln!(writer, "property float z")?;
+        writeln!(writer, "element face {}", self.faces.len())?;
+        writeln!(writer, "property list uchar int vertex_indices")?;
+        writeln!(writer, "end_header")?;
+
+        for v in &self.vertices {
+            writeln!(writer, "{:.6} {:.6} {:.6}", v[0], v[1], v[2])?;
+        }
+        for f in &self.faces {
+            writeln!(writer, "3 {} {} {}", f[0], f[1], f[2])?;
+        }
+
+        Ok(())
+    }
+
+    // -------------------------------------------------------------
+    // Primitives for testing & verification
+    // -------------------------------------------------------------
+
+    /// Generates a watertight cube centered at origin with side length `size`.
+    /// 8 vertices, 12 triangular faces.
+    pub fn cube(size: f64) -> Self {
+        let s = size * 0.5;
+        let vertices = vec![
+            [-s, -s, -s], // 0
+            [s, -s, -s],  // 1
+            [s, s, -s],   // 2
+            [-s, s, -s],  // 3
+            [-s, -s, s],  // 4
+            [s, -s, s],   // 5
+            [s, s, s],    // 6
+            [-s, s, s],   // 7
+        ];
+
+        let faces = vec![
+            // Front (-Z)
+            [0, 2, 1],
+            [0, 3, 2],
+            // Back (+Z)
+            [4, 5, 6],
+            [4, 6, 7],
+            // Left (-X)
+            [0, 4, 7],
+            [0, 7, 3],
+            // Right (+X)
+            [1, 2, 6],
+            [1, 6, 5],
+            // Top (+Y)
+            [3, 7, 6],
+            [3, 6, 2],
+            // Bottom (-Y)
+            [0, 1, 5],
+            [0, 5, 4],
+        ];
+
+        Self::new(vertices, faces)
+    }
+
+    /// Generates a cylinder. If `capped == false`, creates an open cylinder with 2 boundary loops.
+    pub fn cylinder(radius: f64, height: f64, segments: usize, capped: bool) -> Self {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        let h2 = height * 0.5;
+
+        // Bottom ring (0..segments)
+        for i in 0..segments {
+            let theta = 2.0 * std::f64::consts::PI * (i as f64) / (segments as f64);
+            vertices.push([radius * theta.cos(), radius * theta.sin(), -h2]);
+        }
+        // Top ring (segments..2*segments)
+        for i in 0..segments {
+            let theta = 2.0 * std::f64::consts::PI * (i as f64) / (segments as f64);
+            vertices.push([radius * theta.cos(), radius * theta.sin(), h2]);
+        }
+
+        // Side quads as pairs of triangles
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+            let b0 = i;
+            let b1 = next;
+            let t0 = i + segments;
+            let t1 = next + segments;
+
+            faces.push([b0, b1, t0]);
+            faces.push([b1, t1, t0]);
+        }
+
+        if capped {
+            let b_center = vertices.len();
+            vertices.push([0.0, 0.0, -h2]);
+            let t_center = vertices.len();
+            vertices.push([0.0, 0.0, h2]);
+
+            for i in 0..segments {
+                let next = (i + 1) % segments;
+                // Bottom cap
+                faces.push([b_center, (i + 1) % segments, i]);
+                // Top cap
+                faces.push([t_center, i + segments, next + segments]);
+            }
+        }
+
+        Self::new(vertices, faces)
+    }
+
+    /// Generates a known non-manifold T-junction (3 faces sharing an edge).
+    pub fn non_manifold_t_junction() -> Self {
+        let vertices = vec![
+            [0.0, 0.0, 0.0], // 0: bottom of shared edge
+            [0.0, 1.0, 0.0], // 1: top of shared edge
+            [1.0, 0.5, 0.0], // 2: wing 1
+            [-1.0, 0.5, 0.0], // 3: wing 2
+            [0.0, 0.5, 1.0], // 4: wing 3
+        ];
+        let faces = vec![
+            [0, 1, 2], // Face 1 shares (0, 1)
+            [0, 1, 3], // Face 2 shares (0, 1)
+            [0, 1, 4], // Face 3 shares (0, 1) -> 3 faces sharing 1 edge!
+        ];
+        Self::new(vertices, faces)
+    }
+}
